@@ -171,8 +171,9 @@ function AgentDashboard() {
                     <p>No chats available</p>
                 ) : (
                     Object.values(chats).map(chat => {
-                        const customer = chat.participants?.find(p => p.id !== AGENT_ID);
+                        const customer = chat.customer;
                         console.log("customer", customer);
+                        console.log("chat", chat);
                         return (
                             <div
                                 key={chat.id}
