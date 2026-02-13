@@ -1,23 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useSocket } from '../hooks/useSocket';
 import { useGetChatsQuery } from '@/store/api/chatApi.js';
 
 function AgentDashboard() {
     const AGENT_ID = 'cmlertdeh0000ku7bmn9xdtlr';
-    const API_URL = import.meta.env.VITE_API_URL;
     const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
 
-    // Use the socket hook
-    const {
-        socket,
-        isConnected,
-        error,
-        emit,
-        on,
-        off
-    } = useSocket(SOCKET_URL, {
+    const { isConnected, error, emit, on, off } = useSocket(SOCKET_URL, {
         transports: ['websocket'],
-        autoConnect: true
+        autoConnect: true,
     });
 
     const [chats, setChats] = useState({});
@@ -25,94 +16,122 @@ function AgentDashboard() {
     const [activeChatId, setActiveChatId] = useState(null);
     const [newMessage, setNewMessage] = useState('');
 
-    // ---------- RTK QUERY ----------
-    const { data: Chatdata, error: ChatError, isLoading: ChatIsLoading } = useGetChatsQuery(AGENT_ID);
-    // =========================
-    // INITIALIZE SOCKET EVENTS
-    // =========================
+    const messagesEndRef = useRef(null);
+
+    // ---------- LOAD INITIAL DATA (NORMALISED BY CHATAPI) ----------
+    const { data: chatData, error: chatError } = useGetChatsQuery(AGENT_ID);
+
     useEffect(() => {
-        // ---------- INITIALIZE CHAT DATA ----------
-        // Load existing chats (independent of socket)
-        if (Chatdata) {
-            setChats(Chatdata.chatMap);
-            setMessagesStore(Chatdata.messagesMap);
+        if (chatData) {
+            console.log("chatData", chatData);
+            setChats(chatData.chatMap);
+            setMessagesStore(chatData.messagesMap); // ✅ already perfect shape
         }
-        if (ChatError) {
-            console.error('Failed to load chats:', ChatError);
-        }
-        // Set up socket event listeners
+        if (chatError) console.error('Failed to load chats:', chatError);
+    }, [chatData, chatError]);
+
+    // ---------- SOCKET: ONE‑TIME SETUP ----------
+    useEffect(() => {
+        console.log("chats running");
         const handleChatAssigned = (chat) => {
-            console.log('New chat assigned:', chat);
-            setChats(prev => ({
-                ...prev,
-                [chat.id]: chat
+            // Add new chat to sidebar
+            setChats(prev => ({ ...prev, [chat.id]: chat }));
+
+            // Normalise initial messages (same shape as chatApi)
+            const initialMessages = (chat.messages || []).map(msg => ({
+                chatId: chat.id,
+                message: msg.content,
+                senderId: msg.userId ?? msg.customerId,
+                senderType: msg.userId ? 'agent' : 'customer',
+                id: msg.id,
+                timestamp: msg.createdAt,
             }));
-            console.log("chat", chat);
+
             setMessagesStore(prev => ({
                 ...prev,
-                [chat.id]: chat.messages || []
+                [chat.id]: initialMessages,
             }));
-            // alert('New customer assigned!');
+
+            // 🔥 JOIN ROOM IMMEDIATELY – receives all future messages
+            console.log("chat", chat);
+            emit('chat:join', { chatId: chat.id });
         };
 
         const handleNewMessage = (msg) => {
-            if (!msg || !msg.chatId) return;
+            console.log('📨 New message:', msg);
+            if (!msg?.chatId) return;
 
-            console.log('New message received:', msg);
+            // Server already sends { chatId, message, senderId, senderType, id, timestamp }
+            // or we normalise here for safety:
+            const normalised = {
+                chatId: msg.chatId,
+                message: msg.message ?? msg.content,
+                senderId: msg.senderId ?? msg.userId ?? msg.customerId,
+                senderType: msg.senderType ?? (msg.userId ? 'agent' : 'customer'),
+                id: msg.id,
+                timestamp: msg.timestamp ?? msg.createdAt,
+            };
+
             setMessagesStore(prev => ({
                 ...prev,
-                [msg.chatId]: [...(prev[msg.chatId] || []), msg]
+                [msg.chatId]: [...(prev[msg.chatId] || []), normalised],
             }));
+
+            // Unread counter for sidebar (if not active)
+            if (activeChatId !== msg.chatId) {
+                setChats(prev => ({
+                    ...prev,
+                    [msg.chatId]: {
+                        ...prev[msg.chatId],
+                        unreadCount: (prev[msg.chatId]?.unreadCount || 0) + 1,
+                    },
+                }));
+            }
         };
 
-        // Subscribe to events
         on('chat:assigned', handleChatAssigned);
         on('message:new', handleNewMessage);
 
-        // Cleanup
         return () => {
             off('chat:assigned', handleChatAssigned);
             off('message:new', handleNewMessage);
         };
-    }, [on, off]);
+    }, [on, off, emit, activeChatId, chats]);
 
-    // =========================
-    // SEND AGENT CONNECT AFTER CONNECTION
-    // =========================
+    // ---------- AGENT AUTH ----------
     useEffect(() => {
         if (isConnected) {
             console.log('🟢 Sending agent:connect');
-            emit('agent:connect', { agentId: AGENT_ID }, (response) => {
-                console.log('Agent connect response:', response);
-            });
+            emit('agent:connect', { agentId: AGENT_ID }, (res) =>
+                console.log('Agent connect response:', res)
+            );
         }
     }, [isConnected, emit]);
 
-    // =========================
-    // OPEN CHAT
-    // =========================
-    const openChat = (chatId) => {
-        console.log('Opening chat:', chatId);
-        setActiveChatId(chatId);
+    // ---------- JOIN ROOM WHEN ACTIVATING CHAT ----------
+    useEffect(() => {
+        console.log("activeChatId", activeChatId);
+        if (activeChatId && isConnected) {
+            emit('chat:join', { chatId: activeChatId });
 
-        if (isConnected) {
-            emit('chat:join', { chatId });
-        } else {
-            console.log('Cannot join chat: socket not connected');
+            // Reset unread count when opening
+            setChats(prev => ({
+                ...prev,
+                [activeChatId]: { ...prev[activeChatId], unreadCount: 0 },
+            }));
         }
-    };
+    }, [activeChatId, isConnected, emit]);
 
-    // =========================
-    // SEND MESSAGE
-    // =========================
+    // ---------- AUTO‑SCROLL ----------
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messagesStore, activeChatId]);
+
+    // ---------- SEND MESSAGE ----------
     const sendReply = () => {
         const text = newMessage.trim();
         if (!text || !activeChatId) return;
-
-        if (!isConnected) {
-            alert('Not connected to server. Please wait...');
-            return;
-        }
+        if (!isConnected) return alert('Not connected');
 
         const messageData = {
             chatId: activeChatId,
@@ -121,36 +140,30 @@ function AgentDashboard() {
             message: text,
         };
 
-        console.log('Sending message:', messageData);
-
         emit('message:send', messageData, (response) => {
-            console.log('Message send response:', response);
+            console.log('✅ Message sent:', response);
         });
 
-        // Optimistic update
-        const newMsg = {
+        // Optimistic update – unique temporary ID
+        const optimisticMsg = {
             chatId: activeChatId,
+            message: text,
+            senderId: AGENT_ID,
             senderType: 'agent',
-            content: text,
-            timestamp: new Date().toISOString()
+            id: `temp-${Date.now()}-${Math.random()}`,
+            timestamp: new Date().toISOString(),
         };
 
         setMessagesStore(prev => ({
             ...prev,
-            [activeChatId]: [...(prev[activeChatId] || []), newMsg]
+            [activeChatId]: [...(prev[activeChatId] || []), optimisticMsg],
         }));
 
         setNewMessage('');
     };
 
-    // Handle Enter key press
-    const handleKeyPress = (e) => {
-        if (e.key === 'Enter') {
-            sendReply();
-        }
-    };
+    const handleKeyPress = (e) => e.key === 'Enter' && sendReply();
 
-    // Get messages for active chat
     const activeMessages = activeChatId ? messagesStore[activeChatId] || [] : [];
 
     return (
@@ -164,7 +177,7 @@ function AgentDashboard() {
                 {error && <span className="error">Error: {error}</span>}
             </div>
 
-            {/* SIDEBAR */}
+            {/* Sidebar */}
             <div className="sidebar">
                 <h3>Chats</h3>
                 {Object.keys(chats).length === 0 ? (
@@ -172,13 +185,11 @@ function AgentDashboard() {
                 ) : (
                     Object.values(chats).map(chat => {
                         const customer = chat.customer;
-                        console.log("customer", customer);
-                        console.log("chat", chat);
                         return (
                             <div
                                 key={chat.id}
                                 className={`chat-item ${activeChatId === chat.id ? 'active' : ''}`}
-                                onClick={() => openChat(chat.id)}
+                                onClick={() => setActiveChatId(chat.id)}
                             >
                                 <div className="chat-customer-name">
                                     {customer?.name || customer?.email || 'Customer'}
@@ -192,31 +203,29 @@ function AgentDashboard() {
                 )}
             </div>
 
-            {/* MAIN CHAT */}
+            {/* Main Chat Area */}
             <div className="main-chat">
                 {activeChatId ? (
                     <>
                         <div className="messages-container">
-                            <div className="messages" id="messages">
-                                {activeMessages.map((msg, index) => {
-                                    return (
-                                        <div
-                                            key={index}
-                                            className={`message ${msg.senderType === 'agent' ? 'me' : 'customer'}`}
-                                        >
-                                            {msg.content}
-                                        </div>
-                                    )
-                                })}
+                            <div className="messages">
+                                {activeMessages.map(msg => (
+                                    <div
+                                        key={msg.id} // ✅ guaranteed unique
+                                        className={`message ${msg.senderType === 'agent' ? 'me' : 'customer'}`}
+                                    >
+                                        {msg.message}
+                                    </div>
+                                ))}
+                                <div ref={messagesEndRef} />
                             </div>
                         </div>
 
                         <div className="input-box">
                             <input
-                                id="reply"
-                                placeholder={isConnected ? "Type reply..." : "Connecting..."}
+                                placeholder={isConnected ? 'Type reply...' : 'Connecting...'}
                                 value={newMessage}
-                                onChange={(e) => setNewMessage(e.target.value)}
+                                onChange={e => setNewMessage(e.target.value)}
                                 onKeyPress={handleKeyPress}
                                 disabled={!isConnected}
                             />
@@ -236,7 +245,7 @@ function AgentDashboard() {
                 )}
             </div>
         </div>
-    )
+    );
 }
 
 export default AgentDashboard;

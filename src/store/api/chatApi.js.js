@@ -9,7 +9,14 @@ export const chatApi = baseApi.injectEndpoints({
                 const messagesMap = {};
                 response.forEach(chat => {
                     chatMap[chat.id] = chat;
-                    messagesMap[chat.id] = chat.messages || [];
+                    messagesMap[chat.id] = (chat.messages || []).map(msg => ({
+                        chatId: chat.id,
+                        message: msg.content,
+                        senderId: msg.userId ?? msg.customerId,
+                        senderType: msg.userId ? 'agent' : 'customer',
+                        id: msg.id,
+                        timestamp: msg.createdAt,
+                    }));
                 });
                 return { chatMap, messagesMap };
             },
