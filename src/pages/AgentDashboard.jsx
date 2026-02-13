@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useSocket } from '../hooks/useSocket';
 import { useGetChatsQuery } from '@/store/api/chatApi.js';
 
@@ -6,10 +6,12 @@ function AgentDashboard() {
     const AGENT_ID = 'cmlertdeh0000ku7bmn9xdtlr';
     const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
 
-    const { isConnected, error, emit, on, off } = useSocket(SOCKET_URL, {
+    const socketOptions = useMemo(() => ({
         transports: ['websocket'],
         autoConnect: true,
-    });
+    }), []);
+
+    const { isConnected, error, emit, on, off } = useSocket(SOCKET_URL, socketOptions);
 
     const [chats, setChats] = useState({});
     const [messagesStore, setMessagesStore] = useState({});
@@ -72,10 +74,33 @@ function AgentDashboard() {
                 timestamp: msg.timestamp ?? msg.createdAt,
             };
 
-            setMessagesStore(prev => ({
-                ...prev,
-                [msg.chatId]: [...(prev[msg.chatId] || []), normalised],
-            }));
+            setMessagesStore(prev => {
+                const currentMessages = prev[msg.chatId] || [];
+
+                // Check if message ID already exists
+                if (currentMessages.some(m => m.id === normalised.id)) {
+                    return prev;
+                }
+
+                // If message is from current agent, check if it matches an optimistic message
+                if (normalised.senderId === AGENT_ID && normalised.senderType === 'agent') {
+                    const optimisticIndex = currentMessages.findIndex(m =>
+                        m.id.startsWith('temp-') && m.message === normalised.message
+                    );
+
+                    if (optimisticIndex !== -1) {
+                        // Replace optimistic message with real server message
+                        const updatedMessages = [...currentMessages];
+                        updatedMessages[optimisticIndex] = normalised;
+                        return { ...prev, [msg.chatId]: updatedMessages };
+                    }
+                }
+
+                return {
+                    ...prev,
+                    [msg.chatId]: [...currentMessages, normalised],
+                };
+            });
 
             // Unread counter for sidebar (if not active)
             if (activeChatId !== msg.chatId) {
